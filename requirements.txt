@@ -1,0 +1,11 @@
+streamlit
+streamlit-mic-recorder
+langchain
+langchain-core
+langchain-openai
+langchain-community
+openai
+chromadb
+PyPDF2
+gTTS
+python-dotenv
