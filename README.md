@@ -36,21 +36,27 @@
 ```bash
 git clone https://github.com/Sabbir-Azim/RAG-Voice-Bot.git
 cd RAG-Voice-Bot
-
+```
 ### 2️⃣ Create a Virtual Environment
 
+```bash
 python -m venv venv
 source venv/bin/activate    # On Windows: venv\Scripts\activate
+```
 
 ### 3️⃣ Install Dependencies
 
+```bash
 pip install -r requirements.txt
+```
 
 ### 4️⃣ Set Environment Variables
 
+```bash
 Create a file named .env in your project root directory and add your OpenAI API key:
 
 OPENAI_API_KEY=your_openai_api_key_here
+```
 
 ### ▶️ Usage
 
