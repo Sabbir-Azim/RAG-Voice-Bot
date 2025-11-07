@@ -52,9 +52,9 @@ pip install -r requirements.txt
 
 ### 4️⃣ Set Environment Variables
 
-```bash
 Create a file named .env in your project root directory and add your OpenAI API key:
 
+```bash
 OPENAI_API_KEY=your_openai_api_key_here
 ```
 
@@ -62,4 +62,6 @@ OPENAI_API_KEY=your_openai_api_key_here
 
 Run the Streamlit app:
 
+```bash
 streamlit run app.py
+```
