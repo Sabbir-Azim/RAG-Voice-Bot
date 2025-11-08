@@ -12,9 +12,10 @@ from streamlit_mic_recorder import speech_to_text
 import base64
 import tempfile
 import os
+import shutil
 from pathlib import Path
 from dotenv import load_dotenv
-from typing import Optional, Dict, Any
+from typing import Optional, Any
 
 # Load environment variables
 load_dotenv()
@@ -24,13 +25,12 @@ load_dotenv()
 # ===============================
 class Config:
     OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-    COLLECTION_NAME = "xeven_voicebot"
     EMBEDDING_MODEL = "text-embedding-3-small"
     CHAT_MODEL = "gpt-4o-mini"
     CHUNK_SIZE = 500
     CHUNK_OVERLAP = 100
     LANGUAGE = "en"
-    CHROMA_PERSIST_DIR = "./chroma_db"  # Local folder to store embeddings
+    CHROMA_PERSIST_DIR = "./chroma_db"
 
 
 # ===============================
@@ -44,7 +44,8 @@ def initialize_session_state() -> None:
         "recording_key": 0,
         "uploaded_file": None,
         "pdf_processed": False,
-        "chroma_store": None
+        "chroma_store": None,
+        "collection_name": None
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -57,6 +58,15 @@ def initialize_session_state() -> None:
 def upload_pdf() -> Optional[Any]:
     uploaded_file = st.file_uploader("📄 Upload your PDF", type=["pdf"])
     if uploaded_file is not None:
+        # Reset processing flag when new file is uploaded
+        current_file = st.session_state.get("uploaded_file")
+        if current_file is None or current_file.name != uploaded_file.name:
+            st.session_state["pdf_processed"] = False
+            st.session_state["data_stored"] = False
+            st.session_state["chat_history"] = []
+            st.session_state["chroma_store"] = None
+            st.session_state["collection_name"] = None
+            
         st.session_state["file_meta"] = {
             "file_name": uploaded_file.name,
             "file_size": f"{uploaded_file.size / 1024:.2f} KB"
@@ -73,6 +83,13 @@ def process_pdf(uploaded_file: Any) -> None:
 
     try:
         with st.spinner("Processing PDF... ⏳"):
+            import hashlib
+            import time
+            
+            # Generate unique collection name based on filename and timestamp
+            file_hash = hashlib.md5(f"{uploaded_file.name}{time.time()}".encode()).hexdigest()[:8]
+            collection_name = f"doc_{file_hash}"
+            
             # Save temporary PDF
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
                 temp_file.write(uploaded_file.getvalue())
@@ -94,22 +111,24 @@ def process_pdf(uploaded_file: Any) -> None:
                 openai_api_key=Config.OPENAI_API_KEY
             )
 
-            # Create Chroma vector store
+            # Create NEW Chroma vector store with unique collection name
             chroma_store = Chroma.from_documents(
                 documents=chunks,
                 embedding=embeddings,
                 persist_directory=Config.CHROMA_PERSIST_DIR,
-                collection_name=Config.COLLECTION_NAME
+                collection_name=collection_name
             )
 
             chroma_store.persist()
 
             st.session_state["chroma_store"] = chroma_store
+            st.session_state["collection_name"] = collection_name
             st.session_state["data_stored"] = True
             st.session_state["pdf_processed"] = True
+            st.session_state["chat_history"] = []
 
             Path(temp_path).unlink(missing_ok=True)
-            st.success("✅ PDF successfully processed and stored in Chroma!")
+            st.success("✅ PDF successfully processed and stored!")
 
     except Exception as e:
         st.error(f"❌ Error processing PDF: {str(e)}")
@@ -120,6 +139,11 @@ def get_chroma_store() -> Optional[Chroma]:
     if st.session_state.get("chroma_store") is not None:
         return st.session_state["chroma_store"]
 
+    # If no collection name, can't retrieve
+    collection_name = st.session_state.get("collection_name")
+    if not collection_name:
+        return None
+
     try:
         embeddings = OpenAIEmbeddings(
             model=Config.EMBEDDING_MODEL,
@@ -127,7 +151,7 @@ def get_chroma_store() -> Optional[Chroma]:
         )
 
         chroma_store = Chroma(
-            collection_name=Config.COLLECTION_NAME,
+            collection_name=collection_name,
             embedding_function=embeddings,
             persist_directory=Config.CHROMA_PERSIST_DIR
         )
@@ -170,18 +194,25 @@ def text_to_speech(text: str, lang: str = "en") -> BytesIO:
 def generate_response(chroma_store: Chroma, query: str) -> str:
     """RAG pipeline: retrieve context + answer."""
     try:
-        template = """
-        You are a helpful AI assistant. Use the provided context to answer accurately.
-        Always respond in English.
+        template = """You are a helpful AI assistant. Use the provided context to answer accurately.
+Always respond in English.
 
-        Context: {context}
-        Question: {question}
-        Answer:
-        """
+Context: {context}
+
+Question: {question}
+
+Answer:"""
 
         prompt = ChatPromptTemplate.from_template(template)
-        retriever = chroma_store.as_retriever(search_type="similarity", search_kwargs={"k": 4})
-        setup_and_retrieval = RunnableParallel({"context": retriever, "question": RunnablePassthrough()})
+        retriever = chroma_store.as_retriever(
+            search_type="similarity", 
+            search_kwargs={"k": 4}
+        )
+        
+        setup_and_retrieval = RunnableParallel({
+            "context": retriever, 
+            "question": RunnablePassthrough()
+        })
 
         model = ChatOpenAI(
             model=Config.CHAT_MODEL,
@@ -202,6 +233,7 @@ def generate_response(chroma_store: Chroma, query: str) -> str:
 # Display Utilities
 # ===============================
 def display_chat_history() -> None:
+    """Display conversation history."""
     for chat in st.session_state["chat_history"]:
         with st.chat_message("user"):
             st.write(chat["user_input"])
@@ -211,8 +243,10 @@ def display_chat_history() -> None:
 
 
 def display_pdf_preview() -> None:
+    """Display PDF in iframe."""
     if not st.session_state["pdf_processed"]:
         return
+    
     uploaded_file = st.session_state["uploaded_file"]
     if not uploaded_file:
         return
@@ -221,62 +255,89 @@ def display_pdf_preview() -> None:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
             tmp.write(uploaded_file.getvalue())
             path = tmp.name
+            
         with open(path, "rb") as f:
             b64_pdf = base64.b64encode(f.read()).decode("utf-8")
-        st.markdown(f'<iframe src="data:application/pdf;base64,{b64_pdf}" width="100%" height="600px"></iframe>', unsafe_allow_html=True)
+            
+        pdf_display = f'<iframe src="data:application/pdf;base64,{b64_pdf}" width="100%" height="600px" style="border: 1px solid #ddd;"></iframe>'
+        st.markdown(pdf_display, unsafe_allow_html=True)
+        
         Path(path).unlink(missing_ok=True)
+        
     except Exception as e:
         st.error(f"Error displaying PDF: {str(e)}")
 
 
 # ===============================
-# Streamlit App
+# Main Streamlit App
 # ===============================
 def main():
-    st.set_page_config(page_title="Voicebot - Chat with Documents", layout="wide")
+    st.set_page_config(
+        page_title="Voicebot - Chat with Documents",
+        page_icon="🤖",
+        layout="wide"
+    )
+    
     initialize_session_state()
 
+    # Header
     st.title("🎙️ Voicebot - Chat with Your Documents")
-    st.markdown("Upload a PDF, ask with voice, and get answers in text + speech!")
+    st.markdown("Upload a PDF, ask questions in English, and get responses in text and audio!")
 
     # Sidebar
     with st.sidebar:
         st.header("📖 Instructions")
         st.markdown("""
-        1️⃣ Upload a PDF document  
-        2️⃣ Click **Process Document**  
-        3️⃣ Ask using your **voice** (English only)  
-        4️⃣ Get both **text & audio** answers  
+        ### How to Use:
+        1. Upload a PDF document
+        2. Click **Process Document**
+        3. Ask questions using voice input
+        4. Get responses in text and audio (English)
+        
+        ### Notes:
+        - Only the current document is used
+        - Previous documents are automatically removed
+        - Chat history clears with new uploads
         """)
+        
         if st.session_state["file_meta"]:
-            st.info(f"📎 **{st.session_state['file_meta']['file_name']}** — {st.session_state['file_meta']['file_size']}")
+            st.divider()
+            st.info(f"📎 **{st.session_state['file_meta']['file_name']}**\n\n{st.session_state['file_meta']['file_size']}")
 
-    # Layout
+    # Main Layout
     col1, col2 = st.columns([1, 1])
 
     with col1:
-        st.header("💬 Upload & Ask")
+        st.header("💬 Upload & Chat")
+        
         uploaded_file = upload_pdf()
 
         if uploaded_file and not st.session_state["pdf_processed"]:
-            if st.button("🔄 Process Document", use_container_width=True):
+            if st.button("🔄 Process Document", type="primary", use_container_width=True):
                 process_pdf(uploaded_file)
 
         if st.session_state["data_stored"]:
-            st.subheader("🎤 Ask your question")
+            st.divider()
+            st.subheader("🎤 Ask Your Question")
+            
             audio_input = process_audio_input()
+            
             if audio_input:
                 st.session_state["recording_key"] += 1
+                
                 with st.spinner("Generating response..."):
                     chroma_store = get_chroma_store()
+                    
                     if chroma_store:
                         bot_response = generate_response(chroma_store, audio_input)
                         bot_audio = text_to_speech(bot_response, lang=Config.LANGUAGE)
+                        
                         st.session_state["chat_history"].append({
                             "user_input": audio_input,
                             "bot_response": bot_response,
                             "bot_audio": bot_audio
                         })
+                        
                         st.rerun()
 
             if st.session_state["chat_history"]:
@@ -285,11 +346,11 @@ def main():
                 display_chat_history()
 
     with col2:
-        st.header("📄 PDF Preview")
+        st.header("📄 Document Preview")
         if st.session_state["pdf_processed"]:
             display_pdf_preview()
         else:
-            st.info("Upload and process a document to preview it here.")
+            st.info("📤 Upload and process a document to preview it here.")
 
 
 if __name__ == "__main__":
